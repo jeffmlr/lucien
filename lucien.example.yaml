@@ -1,0 +1,277 @@
+# Lucien Configuration Example
+# Copy this file to lucien.yaml and customize for your setup
+
+# =============================================================================
+# Core Paths
+# =============================================================================
+
+# Root directory of your source backup (immutable, read-only)
+# This is the directory Lucien will scan and index
+source_root: /Volumes/Backup/Documents
+
+# SQLite database path for file index and metadata
+index_db: ~/.local/share/lucien/index.db
+
+# Directory for extracted text sidecars
+extracted_text_dir: ~/.local/share/lucien/extracted_text
+
+# Staging mirror root directory (where organized files will be created)
+staging_root: ~/Documents/Lucien-Staging
+
+# =============================================================================
+# LLM Settings (for AI labeling via LM Studio)
+# =============================================================================
+
+llm:
+  # LM Studio API base URL
+  base_url: http://localhost:1234/v1
+
+  # Default model for general document labeling
+  default_model: qwen2.5-7b-instruct
+
+  # Escalation model for complex/sensitive documents
+  escalation_model: qwen2.5-14b-instruct
+
+  # Confidence threshold for escalation (0.0 to 1.0)
+  # If initial model produces confidence < threshold, retry with escalation model
+  escalation_threshold: 0.7
+
+  # Document types that always use escalation model (regardless of confidence)
+  escalation_doc_types:
+    - taxes
+    - medical
+    - legal
+    - insurance
+
+  # Maximum retry attempts for LLM calls
+  max_retries: 3
+
+  # Timeout for LLM calls (seconds)
+  timeout: 120
+
+# =============================================================================
+# Text Extraction Settings
+# =============================================================================
+
+extraction:
+  # File extensions to skip during extraction (no text to extract)
+  skip_extensions:
+    - .jpg
+    - .jpeg
+    - .png
+    - .gif
+    - .bmp
+    - .tiff
+    - .mp4
+    - .mov
+    - .avi
+    - .mkv
+    - .mp3
+    - .wav
+    - .zip
+    - .tar
+    - .gz
+    - .rar
+    - .7z
+
+  # Extraction methods to try in order
+  methods:
+    - docling      # Primary: Docling for PDFs and Office docs
+    - pypdf        # Fallback: pypdf for simple PDFs
+    - textract     # Fallback: textract for various formats
+
+  # Maximum text length to extract (characters)
+  max_text_length: 50000
+
+# =============================================================================
+# Taxonomy and Categorization
+# =============================================================================
+
+taxonomy:
+  # Top-level taxonomy folders (customize to your needs)
+  top_level:
+    - "01 Identity & Legal"
+    - "02 Medical"
+    - "03 Financial"
+    - "04 Taxes"
+    - "05 Insurance"
+    - "06 Home"
+    - "07 Vehicles"
+    - "08 Work & Retirement"
+    - "09 Travel"
+    - "10 Family Photos & Media"
+    - "98 Uncategorized"
+    - "99 Needs Review"
+
+# =============================================================================
+# Controlled Vocabularies
+# =============================================================================
+
+# Document types (used by LLM for classification)
+doc_types:
+  # Identity & Legal
+  - identity
+  - legal
+  - contract
+  - deed
+  - will
+  - trust
+  - power_of_attorney
+
+  # Medical
+  - medical
+  - prescription
+  - lab_result
+  - medical_record
+  - insurance_eob
+  - vaccination
+
+  # Financial
+  - financial
+  - bank_statement
+  - investment
+  - receipt
+  - invoice
+  - credit_card
+
+  # Taxes
+  - tax
+  - w2
+  - 1099
+  - 1040
+  - tax_return
+
+  # Insurance
+  - insurance
+  - policy
+  - claim
+  - declaration
+
+  # Home
+  - home
+  - mortgage
+  - utility
+  - repair
+  - warranty
+  - lease
+
+  # Vehicles
+  - vehicle
+  - registration
+  - maintenance
+  - auto_insurance
+
+  # Work & Retirement
+  - work
+  - payslip
+  - 401k
+  - retirement
+  - pension
+
+  # Travel
+  - travel
+  - passport
+  - visa
+  - itinerary
+  - booking
+  - ticket
+
+  # Media
+  - photo
+  - video
+  - media
+
+  # Other
+  - other
+  - uncategorized
+
+# Tags (suggested tags vocabulary - user-extendable)
+tags:
+  # Status tags
+  - important
+  - action-required
+  - archived
+  - completed
+  - pending
+
+  # Financial tags
+  - tax-deductible
+  - warranty
+  - recurring
+  - paid
+  - unpaid
+
+  # Project tags (add your own)
+  # - project-name
+  # - client-name
+
+  # Year tags (add as needed)
+  # - 2024
+  # - 2023
+
+# =============================================================================
+# Naming Conventions
+# =============================================================================
+
+naming:
+  # Canonical filename format template
+  # Placeholders: YYYY, MM, DD, Domain, Issuer, Title
+  format: "YYYY-MM-DD__Domain__Issuer__Title"
+
+  # Field separator in filenames
+  separator: "__"
+
+  # Date format (strftime)
+  date_format: "%Y-%m-%d"
+
+# =============================================================================
+# Filesystem Scanning
+# =============================================================================
+
+scan:
+  # Directory names to skip during scanning
+  skip_dirs:
+    - .git
+    - .svn
+    - .hg
+    - .cache
+    - __pycache__
+    - node_modules
+    - .DS_Store
+    - .Trash
+    - .Spotlight-V100
+    - .TemporaryItems
+    - .fseventsd
+
+  # Whether to follow symlinks
+  follow_symlinks: false
+
+  # Hash algorithm for file integrity
+  hash_algorithm: sha256
+
+# =============================================================================
+# Materialization Settings
+# =============================================================================
+
+materialize:
+  # Default copy mode: 'copy' or 'hardlink'
+  # - copy: Duplicates files (uses more space, safer)
+  # - hardlink: Creates hardlinks (saves space, requires same filesystem)
+  default_mode: hardlink
+
+  # Apply macOS Finder tags to files
+  apply_tags: true
+
+  # Automatically create target directories
+  create_dirs: true
+
+# =============================================================================
+# Logging
+# =============================================================================
+
+# Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_level: INFO
+
+# Optional log file path (null = no file logging)
+log_file: null
+# log_file: ~/.local/share/lucien/lucien.log
