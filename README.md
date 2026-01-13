@@ -83,10 +83,10 @@ lucien stats
 Lucien implements a 5-phase pipeline:
 
 ```
-Phase 0: Scan/Index          → SQLite Database
-Phase 1: Text Extraction     → Text sidecars (10_extracted_text/)
+Phase 0: Scan/Index          → SQLite Database (~/.lucien/db/)
+Phase 1: Text Extraction     → Text sidecars (~/.lucien/extracted_text/)
 Phase 2: AI Labeling (LLM)   → Labels in database
-Phase 3: Plan Generation     → plan.jsonl, plan.csv (reviewable)
+Phase 3: Plan Generation     → plan.jsonl, plan.csv (~/.lucien/plans/)
 Phase 4: Materialize Staging → Organized staging mirror + tags
 Phase 5: DEVONthink Import   → Manual import (with helpers)
 ```
@@ -95,18 +95,22 @@ Each phase is **idempotent** and **resumable**. The source backup is **never mod
 
 ## Configuration
 
-Configuration is loaded from:
-1. `~/.config/lucien/config.yaml` (user config)
-2. `./lucien.yaml` (project-local config)
-3. Environment variables (prefix: `LUCIEN_`)
+Configuration is loaded from (in order of precedence):
+1. `./lucien.yaml` (project-local config)
+2. `~/.lucien/config.yaml` (user config)
+3. `~/.config/lucien/config.yaml` (XDG user config, legacy)
+4. Environment variables (prefix: `LUCIEN_`)
+5. Built-in defaults
 
 Example `lucien.yaml`:
 
 ```yaml
 # Source and outputs
 source_root: /Volumes/Backup/Documents
-index_db: ~/.local/share/lucien/index.db
-extracted_text_dir: ~/.local/share/lucien/extracted_text
+index_db: ~/.lucien/db/index.db
+extracted_text_dir: ~/.lucien/extracted_text
+plans_dir: ~/.lucien/plans
+cache_dir: ~/.lucien/cache
 staging_root: ~/Documents/Lucien-Staging
 
 # LLM settings
@@ -139,6 +143,25 @@ taxonomy:
 ```
 
 See [example configuration](lucien.example.yaml) for full options.
+
+### Directory Structure
+
+Lucien stores all application data in `~/.lucien/`:
+
+```
+~/.lucien/
+├── db/
+│   └── index.db              # SQLite database (files, extractions, labels, plans)
+├── extracted_text/           # Text extraction sidecars
+│   └── <sha256>.txt          # Extracted text keyed by file hash
+├── plans/                    # Generated materialization plans
+│   ├── plan_<timestamp>.jsonl
+│   └── plan_<timestamp>.csv
+├── logs/                     # Application logs
+│   └── lucien.log
+├── cache/                    # Optional cache (LLM responses, etc.)
+└── config.yaml               # Optional user configuration
+```
 
 ## CLI Commands
 

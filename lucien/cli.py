@@ -191,7 +191,7 @@ def init_config(
     user: bool = typer.Option(
         False,
         "--user",
-        help="Create user config at ~/.config/lucien/config.yaml",
+        help="Create user config at ~/.lucien/config.yaml",
     ),
 ):
     """
@@ -201,7 +201,7 @@ def init_config(
         config = LucienSettings()
 
         if user:
-            output = Path.home() / ".config/lucien/config.yaml"
+            output = Path.home() / ".lucien/config.yaml"
 
         if output.exists():
             overwrite = typer.confirm(f"Config file exists at {output}. Overwrite?")

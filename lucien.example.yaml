@@ -10,10 +10,16 @@
 source_root: /Volumes/Backup/Documents
 
 # SQLite database path for file index and metadata
-index_db: ~/.local/share/lucien/index.db
+index_db: ~/.lucien/db/index.db
 
 # Directory for extracted text sidecars
-extracted_text_dir: ~/.local/share/lucien/extracted_text
+extracted_text_dir: ~/.lucien/extracted_text
+
+# Directory for generated materialization plans
+plans_dir: ~/.lucien/plans
+
+# Cache directory for LLM responses and other temporary data
+cache_dir: ~/.lucien/cache
 
 # Staging mirror root directory (where organized files will be created)
 staging_root: ~/Documents/Lucien-Staging
@@ -272,6 +278,6 @@ materialize:
 # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
 log_level: INFO
 
-# Optional log file path (null = no file logging)
-log_file: null
-# log_file: ~/.local/share/lucien/lucien.log
+# Log file path (set to null to disable file logging)
+log_file: ~/.lucien/logs/lucien.log
+# log_file: null  # Uncomment to disable file logging

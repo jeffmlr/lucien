@@ -53,7 +53,7 @@ Lucien is a Mac-first, open-source document library builder that transforms an *
          ↓
     Phase 1: Text Extraction
          ↓
- [10_extracted_text/ sidecars]
+ [~/.lucien/extracted_text/ sidecars]
          ↓
     Phase 2: AI Labeling (LLM)
          ↓
@@ -91,7 +91,7 @@ Lucien is a Mac-first, open-source document library builder that transforms an *
   - Fallback: pypdf, textract, or custom parsers
   - OCR hooks designed but not implemented in v1
 - **Output**:
-  - Text sidecars in `10_extracted_text/` (`.txt` or `.md`)
+  - Text sidecars in `~/.lucien/extracted_text/` (`.txt` or `.md`)
   - Extraction metadata in `extractions` table
 - **Idempotency**: Skip files with existing successful extractions
 
@@ -350,16 +350,21 @@ Apply tags using native macOS extended attributes:
 ## Configuration
 
 ### Config File Locations
-1. `~/.config/lucien/config.yaml` (user config)
-2. `./lucien.yaml` (project-local config)
-3. Environment variables (override)
+Configuration is loaded in order of precedence (highest to lowest):
+1. `./lucien.yaml` (project-local config)
+2. `~/.lucien/config.yaml` (user config)
+3. `~/.config/lucien/config.yaml` (XDG user config, legacy)
+4. Environment variables (override)
+5. Built-in defaults
 
 ### Config Schema (Example)
 ```yaml
 # Source and outputs
 source_root: /Volumes/Backup/Documents
-index_db: ~/.local/share/lucien/index.db
-extracted_text_dir: ~/.local/share/lucien/extracted_text
+index_db: ~/.lucien/db/index.db
+extracted_text_dir: ~/.lucien/extracted_text
+plans_dir: ~/.lucien/plans
+cache_dir: ~/.lucien/cache
 staging_root: ~/Documents/Lucien-Staging
 
 # LLM settings

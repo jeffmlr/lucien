@@ -191,7 +191,7 @@ lucien stats                           # Show database statistics
 
 # Configuration
 lucien init-config                     # Create lucien.yaml
-lucien init-config --user              # Create ~/.config/lucien/config.yaml
+lucien init-config --user              # Create ~/.lucien/config.yaml
 
 # Development
 pytest                                 # Run tests
@@ -211,7 +211,7 @@ mypy lucien/                           # Type check
 
 2. **Phase 1: Text Extraction** (⏳ Milestone 2)
    - Extract text from PDFs, Office docs
-   - Store as sidecars in `10_extracted_text/`
+   - Store as sidecars in `~/.lucien/extracted_text/`
 
 3. **Phase 2: AI Labeling** (⏳ Milestone 3)
    - Call LM Studio for document classification
@@ -242,10 +242,12 @@ SQLite tables:
 
 ### Configuration Hierarchy
 
-1. Defaults (in `config.py`)
-2. User config (`~/.config/lucien/config.yaml`)
-3. Project config (`./lucien.yaml`)
+Configuration is loaded in order of precedence (highest to lowest):
+1. Project config (`./lucien.yaml`)
+2. User config (`~/.lucien/config.yaml`)
+3. XDG user config (`~/.config/lucien/config.yaml`, legacy)
 4. Environment variables (`LUCIEN_*`)
+5. Defaults (in `config.py`)
 
 ## Configuration Reference
 
@@ -254,7 +256,9 @@ Key settings in `lucien.yaml`:
 ```yaml
 # Core paths
 source_root: /Volumes/Backup/Documents
-index_db: ~/.local/share/lucien/index.db
+index_db: ~/.lucien/db/index.db
+extracted_text_dir: ~/.lucien/extracted_text
+plans_dir: ~/.lucien/plans
 staging_root: ~/Documents/Lucien-Staging
 
 # LLM (for Milestone 3)

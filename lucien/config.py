@@ -1,10 +1,12 @@
 """
 Configuration management using Pydantic Settings.
 
-Loads configuration from:
-1. ~/.config/lucien/config.yaml (user config)
-2. ./lucien.yaml (project-local config)
-3. Environment variables (override)
+Loads configuration from (in order of precedence, highest to lowest):
+1. ./lucien.yaml (project-local config)
+2. ~/.lucien/config.yaml (user config, new location)
+3. ~/.config/lucien/config.yaml (XDG user config, legacy location)
+4. Environment variables (LUCIEN_ prefix)
+5. Built-in defaults
 """
 
 import os
@@ -106,16 +108,24 @@ class LucienSettings(BaseSettings):
     # Core paths
     source_root: Optional[Path] = Field(default=None, description="Root path to source backup (immutable)")
     index_db: Path = Field(
-        default_factory=lambda: Path.home() / ".local/share/lucien/index.db",
+        default_factory=lambda: Path.home() / ".lucien/db/index.db",
         description="SQLite database path"
     )
     extracted_text_dir: Path = Field(
-        default_factory=lambda: Path.home() / ".local/share/lucien/extracted_text",
+        default_factory=lambda: Path.home() / ".lucien/extracted_text",
         description="Directory for extracted text sidecars"
     )
     staging_root: Path = Field(
         default_factory=lambda: Path.home() / "Documents/Lucien-Staging",
         description="Staging mirror root directory"
+    )
+    plans_dir: Path = Field(
+        default_factory=lambda: Path.home() / ".lucien/plans",
+        description="Directory for generated materialization plans"
+    )
+    cache_dir: Path = Field(
+        default_factory=lambda: Path.home() / ".lucien/cache",
+        description="Cache directory for LLM responses and other temporary data"
     )
 
     # Subsystem settings
@@ -154,13 +164,20 @@ class LucienSettings(BaseSettings):
 
     # Logging
     log_level: str = Field(default="INFO", description="Logging level")
-    log_file: Optional[Path] = Field(default=None, description="Optional log file path")
+    log_file: Optional[Path] = Field(
+        default_factory=lambda: Path.home() / ".lucien/logs/lucien.log",
+        description="Log file path"
+    )
 
     def ensure_directories(self) -> None:
         """Ensure all required directories exist."""
         self.index_db.parent.mkdir(parents=True, exist_ok=True)
         self.extracted_text_dir.mkdir(parents=True, exist_ok=True)
         self.staging_root.mkdir(parents=True, exist_ok=True)
+        self.plans_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if self.log_file:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
 
     @classmethod
     def load_from_yaml(cls, yaml_path: Path) -> "LucienSettings":
@@ -176,21 +193,31 @@ class LucienSettings(BaseSettings):
     @classmethod
     def load(cls) -> "LucienSettings":
         """
-        Load configuration with precedence:
+        Load configuration with precedence (highest to lowest):
         1. Project-local ./lucien.yaml
-        2. User config ~/.config/lucien/config.yaml
-        3. Environment variables
-        4. Defaults
+        2. User config ~/.lucien/config.yaml
+        3. XDG user config ~/.config/lucien/config.yaml (legacy)
+        4. Environment variables
+        5. Defaults
         """
         # Start with defaults
         config = cls()
 
-        # Try user config
-        user_config = Path.home() / ".config/lucien/config.yaml"
-        if user_config.exists():
-            config = cls.load_from_yaml(user_config)
+        # Try XDG user config (legacy location)
+        xdg_config = Path.home() / ".config/lucien/config.yaml"
+        if xdg_config.exists():
+            config = cls.load_from_yaml(xdg_config)
 
-        # Override with project-local config
+        # Try new user config location (overrides XDG)
+        user_config = Path.home() / ".lucien/config.yaml"
+        if user_config.exists():
+            user_dict = {}
+            with open(user_config) as f:
+                user_dict = yaml.safe_load(f)
+            # Merge with existing config
+            config = cls(**{**config.model_dump(), **user_dict})
+
+        # Override with project-local config (highest priority)
         local_config = Path.cwd() / "lucien.yaml"
         if local_config.exists():
             local_dict = {}
