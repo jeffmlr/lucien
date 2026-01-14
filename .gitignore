@@ -39,6 +39,14 @@ venv.bak/
 *~
 .DS_Store
 
+# Agentic coding tools
+.claude/
+.cursor/
+.windsurf/
+.continue/
+settings.local.json
+**/settings.local.json
+
 # Testing
 .pytest_cache/
 .coverage
