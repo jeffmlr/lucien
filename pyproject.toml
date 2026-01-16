@@ -36,6 +36,9 @@ extraction = [
     "docling>=1.0.0",
     "pypdf>=4.0.0",
     "python-magic>=0.4.27",
+    "chardet>=5.0.0",
+    "pyobjc-framework-Quartz>=10.1",  # Apple Vision OCR
+    "pyobjc-framework-Vision>=10.1",  # Apple Vision OCR
 ]
 
 # macOS tags dependencies (Milestone 4)

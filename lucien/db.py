@@ -200,8 +200,12 @@ class Database:
     @contextmanager
     def _get_connection(self) -> Generator[sqlite3.Connection, None, None]:
         """Context manager for database connections."""
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
+        # Enable WAL mode for better concurrent access
+        conn.execute("PRAGMA journal_mode=WAL")
+        # Set busy timeout to handle concurrent writes
+        conn.execute("PRAGMA busy_timeout=30000")
         try:
             yield conn
             conn.commit()
@@ -419,6 +423,273 @@ class Database:
                 data["tags"] = json.loads(data["tags"]) if data["tags"] else []
                 plans.append(PlanRecord(**data))
             return plans
+
+    def count_files_for_extraction(self, force: bool = False, skip_extensions: Optional[List[str]] = None) -> int:
+        """
+        Count files that need extraction.
+
+        Args:
+            force: If True, count all files even if already extracted
+            skip_extensions: List of file extensions to skip (e.g., ['.jpg', '.png'])
+
+        Returns:
+            Number of files needing extraction
+        """
+        with self._get_connection() as conn:
+            if force:
+                query = "SELECT COUNT(*) FROM files f"
+                params = []
+            else:
+                query = """
+                    SELECT COUNT(*)
+                    FROM files f
+                    LEFT JOIN extractions e ON f.id = e.file_id AND e.status = 'success'
+                    WHERE e.id IS NULL
+                """
+                params = []
+
+            # Add extension filtering if skip_extensions provided
+            if skip_extensions:
+                # Build SQL to exclude files with skip extensions
+                # Use LOWER() to make comparison case-insensitive
+                extension_conditions = []
+                for ext in skip_extensions:
+                    # Simple LIKE pattern - no special characters to escape in extensions
+                    # Match files ending with the extension (case-insensitive)
+                    safe_ext = ext.lower()
+                    extension_conditions.append(f"LOWER(f.path) NOT LIKE '%{safe_ext}'")
+
+                if extension_conditions:
+                    if "WHERE" in query:
+                        query += " AND (" + " AND ".join(extension_conditions) + ")"
+                    else:
+                        query += " WHERE (" + " AND ".join(extension_conditions) + ")"
+
+            cursor = conn.execute(query, params)
+            return cursor.fetchone()[0]
+
+    def count_previously_extracted_files(self) -> int:
+        """
+        Count files that were already successfully extracted.
+
+        Returns:
+            Number of files with successful extractions
+        """
+        with self._get_connection() as conn:
+            query = """
+                SELECT COUNT(DISTINCT f.id)
+                FROM files f
+                INNER JOIN extractions e ON f.id = e.file_id AND e.status = 'success'
+            """
+            cursor = conn.execute(query)
+            return cursor.fetchone()[0]
+
+    def count_files_with_skip_extensions(self, skip_extensions: Optional[List[str]] = None) -> int:
+        """
+        Count files that match skip extensions.
+
+        Args:
+            skip_extensions: List of file extensions to count (e.g., ['.jpg', '.png'])
+
+        Returns:
+            Number of files matching skip extensions
+        """
+        if not skip_extensions:
+            return 0
+
+        with self._get_connection() as conn:
+            # Build SQL to match files with skip extensions
+            extension_conditions = []
+            for ext in skip_extensions:
+                # Simple LIKE pattern - no special characters to escape in extensions
+                safe_ext = ext.lower()
+                extension_conditions.append(f"LOWER(f.path) LIKE '%{safe_ext}'")
+
+            if not extension_conditions:
+                return 0
+
+            query = f"SELECT COUNT(*) FROM files f WHERE ({' OR '.join(extension_conditions)})"
+            cursor = conn.execute(query)
+            return cursor.fetchone()[0]
+
+    def get_files_for_extraction(self, force: bool = False, limit: Optional[int] = None,
+                                 offset: Optional[int] = None, batch_size: Optional[int] = None,
+                                 skip_extensions: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        Get files that need extraction.
+
+        Args:
+            force: If True, include all files even if already extracted
+            limit: Maximum number of files to return (total)
+            offset: Offset for pagination
+            batch_size: Number of files to return in this batch (for memory efficiency)
+            skip_extensions: List of file extensions to skip (e.g., ['.jpg', '.png'])
+
+        Returns:
+            List of file records as dictionaries
+        """
+        with self._get_connection() as conn:
+            if force:
+                # Get all files
+                query = "SELECT f.id, f.path, f.sha256 FROM files f"
+                params = []
+            else:
+                # Get files without successful extraction
+                query = """
+                    SELECT f.id, f.path, f.sha256
+                    FROM files f
+                    LEFT JOIN extractions e ON f.id = e.file_id AND e.status = 'success'
+                    WHERE e.id IS NULL
+                """
+                params = []
+
+            # Add extension filtering if skip_extensions provided
+            if skip_extensions:
+                # Build SQL to exclude files with skip extensions
+                # Use LOWER() to make comparison case-insensitive
+                extension_conditions = []
+                for ext in skip_extensions:
+                    # Simple LIKE pattern - no special characters to escape in extensions
+                    # Match files ending with the extension (case-insensitive)
+                    safe_ext = ext.lower()
+                    extension_conditions.append(f"LOWER(f.path) NOT LIKE '%{safe_ext}'")
+
+                if extension_conditions:
+                    if "WHERE" in query:
+                        query += " AND (" + " AND ".join(extension_conditions) + ")"
+                    else:
+                        query += " WHERE (" + " AND ".join(extension_conditions) + ")"
+
+            # Add ORDER BY before LIMIT/OFFSET
+            query += " ORDER BY f.path" if "ORDER BY" not in query else ""
+
+            # Apply pagination if batch_size is specified
+            if batch_size:
+                query += " LIMIT ?"
+                params.append(batch_size)
+                if offset is not None:
+                    query += " OFFSET ?"
+                    params.append(offset)
+            elif limit:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            cursor = conn.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def record_extraction(self, file_id: int, run_id: int, method: str, status: str,
+                         output_path: Optional[str] = None, error: Optional[str] = None) -> int:
+        """
+        Record an extraction result.
+
+        Args:
+            file_id: File ID
+            run_id: Extraction run ID
+            method: Extraction method used
+            status: Extraction status ('success', 'failed', 'skipped')
+            output_path: Path to extracted text sidecar
+            error: Error message if extraction failed
+
+        Returns:
+            Extraction record ID
+        """
+        extraction = ExtractionRecord(
+            file_id=file_id,
+            method=method,
+            status=status,
+            output_path=output_path,
+            error=error,
+            extraction_run_id=run_id
+        )
+        return self.insert_extraction(extraction)
+
+    def get_extraction_stats(self, run_id: Optional[int] = None) -> Dict[str, int]:
+        """
+        Get extraction statistics.
+
+        Args:
+            run_id: Optional run ID to filter stats
+
+        Returns:
+            Dictionary with extraction counts by status
+        """
+        with self._get_connection() as conn:
+            if run_id:
+                query = """
+                    SELECT status, COUNT(*) as count
+                    FROM extractions
+                    WHERE extraction_run_id = ?
+                    GROUP BY status
+                """
+                params = (run_id,)
+            else:
+                query = """
+                    SELECT status, COUNT(*) as count
+                    FROM extractions
+                    GROUP BY status
+                """
+                params = ()
+
+            cursor = conn.execute(query, params)
+            stats = {row["status"]: row["count"] for row in cursor.fetchall()}
+
+            # Ensure all status types are present
+            for status in ["success", "failed", "skipped"]:
+                if status not in stats:
+                    stats[status] = 0
+
+            return stats
+
+    def get_sample_files_for_extraction(self, force: bool = False, skip_extensions: Optional[List[str]] = None, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get a sample of files that need extraction for debugging.
+
+        Args:
+            force: If True, include all files even if already extracted
+            skip_extensions: List of file extensions to skip
+            limit: Number of sample files to return
+
+        Returns:
+            List of file records with extraction status
+        """
+        with self._get_connection() as conn:
+            if force:
+                query = """
+                    SELECT f.id, f.path,
+                           (SELECT COUNT(*) FROM extractions e WHERE e.file_id = f.id AND e.status = 'success') as success_count,
+                           (SELECT COUNT(*) FROM extractions e WHERE e.file_id = f.id) as total_extractions
+                    FROM files f
+                """
+                params = []
+            else:
+                query = """
+                    SELECT f.id, f.path,
+                           (SELECT COUNT(*) FROM extractions e WHERE e.file_id = f.id AND e.status = 'success') as success_count,
+                           (SELECT COUNT(*) FROM extractions e WHERE e.file_id = f.id) as total_extractions
+                    FROM files f
+                    LEFT JOIN extractions e ON f.id = e.file_id AND e.status = 'success'
+                    WHERE e.id IS NULL
+                """
+                params = []
+
+            # Add extension filtering
+            if skip_extensions:
+                extension_conditions = []
+                for ext in skip_extensions:
+                    # Simple LIKE pattern - no special characters to escape in extensions
+                    safe_ext = ext.lower()
+                    extension_conditions.append(f"LOWER(f.path) NOT LIKE '%{safe_ext}'")
+
+                if extension_conditions:
+                    if "WHERE" in query:
+                        query += " AND (" + " AND ".join(extension_conditions) + ")"
+                    else:
+                        query += " WHERE (" + " AND ".join(extension_conditions) + ")"
+
+            query += f" ORDER BY f.path LIMIT {limit}"
+
+            cursor = conn.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
 
     # Statistics and queries
     def get_stats(self) -> Dict[str, Any]:

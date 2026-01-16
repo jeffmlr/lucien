@@ -8,6 +8,7 @@ import gc
 import json
 import logging
 import multiprocessing
+import re
 import sys
 import threading
 import time
@@ -264,6 +265,11 @@ def extract(
         "-j",
         help="Number of parallel workers (default: number of CPU cores)",
     ),
+    no_docling: bool = typer.Option(
+        False,
+        "--no-docling",
+        help="Disable Docling extractor (reduces memory usage from ~10GB to ~100MB per worker)",
+    ),
 ):
     """
     Phase 1: Extract text from documents.
@@ -286,6 +292,10 @@ def extract(
         if output_dir:
             config.extracted_text_dir = output_dir
 
+        # Override extraction settings
+        if no_docling:
+            config.extraction.use_docling = False
+
         # Ensure directories exist
         config.ensure_directories()
 
@@ -298,10 +308,8 @@ def extract(
         console.print(f"\n[bold cyan]Starting text extraction[/]")
         console.print(f"[bold cyan]Database:[/] {config.index_db}")
         console.print(f"[bold cyan]Output:[/] {config.extracted_text_dir}")
-        if force:
-            console.print("[yellow]Force mode: Re-extracting all files[/]")
         if limit:
-            console.print(f"[yellow]Limit: Processing first {limit} files[/]\n")
+            console.print(f"[yellow]Limit: Processing first {limit} files[/]")
 
         # Initialize pipeline
         pipeline = ExtractionPipeline(config, database)
@@ -311,8 +319,20 @@ def extract(
         if limit:
             total_files = min(total_files, limit)
 
+        # Get diagnostic counts
+        previously_extracted = database.count_previously_extracted_files()
+        skip_extension_count = database.count_files_with_skip_extensions(config.extraction.skip_extensions)
+        total_in_db = database.get_stats()["total_files"]
+
+        # Show diagnostic information
+        console.print(f"\n[bold cyan]Database Summary:[/]")
+        console.print(f"  Total files in database: {total_in_db:,}")
+        console.print(f"  Previously extracted: {previously_extracted:,}")
+        console.print(f"  Filtered by skip extensions: {skip_extension_count:,}")
+        console.print(f"  [bold]Files to process: {total_files:,}[/]")
+
         if total_files == 0:
-            console.print("[green]✓ No files need extraction[/]")
+            console.print("\n[green]✓ No files need extraction[/]")
             database.complete_run(run_id)
             sys.exit(0)
 
@@ -322,13 +342,61 @@ def extract(
             workers = os.cpu_count() or 1
         workers = max(1, min(workers, os.cpu_count() or 1))  # Clamp between 1 and CPU count
 
-        console.print(f"[cyan]Files to process: {total_files}[/]")
-        console.print(f"[cyan]Parallel workers: {workers}[/]")
+        console.print(f"\n[cyan]Parallel workers: {workers}[/]")
+        if force:
+            console.print("[yellow]Force mode: Re-extracting all files (ignoring previous extractions)[/]")
+
+        # Show extractor configuration
+        if config.extraction.use_docling:
+            console.print("[cyan]Using Docling (high quality, ~2-5GB RAM per worker)[/]")
+            console.print("[cyan]Workers restart every 20 files to prevent memory accumulation[/]")
+            console.print("[yellow]Note: Complex PDFs may take 5-10 minutes to process[/]")
+        else:
+            console.print("[yellow]Docling disabled - using pypdf/vision-ocr (~100MB RAM per worker)[/]")
+
         console.print("[yellow]Using subprocess isolation to prevent memory leaks[/]\n")
 
         # Extract files with progress bar (process in parallel subprocesses for memory isolation)
-        stats = {"success": 0, "failed": 0, "skipped": 0}
+        # Track detailed stats with reasons
+        stats = {
+            "success": 0,
+            "success_methods": {},  # method -> count
+            "failed": 0,
+            "failed_reasons": {},  # reason -> count
+            "skipped": 0,
+            "skipped_reasons": {},  # reason -> count
+        }
         batch_size = 100  # Process 100 files at a time
+
+        def categorize_reason(error_msg: str) -> str:
+            """Categorize an error message into a displayable reason."""
+            if not error_msg:
+                return "Unknown"
+            # Categorize common patterns
+            if "in skip list" in error_msg:
+                # Extract extension from "Extension .jpg in skip list"
+                match = re.search(r'Extension (\.\w+)', error_msg)
+                if match:
+                    return f"Skipped: {match.group(1)} in skip list"
+                return "Skipped: Extension in skip list"
+            elif "No extractor available" in error_msg:
+                return "Skipped: No extractor available"
+            elif "Docling timed out" in error_msg:
+                return "Failed: Docling timeout (hung on complex PDF)"
+            elif "All extractors failed" in error_msg:
+                # Try to extract the actual error
+                match = re.search(r'Last error: (.+)', error_msg)
+                if match:
+                    last_error = match.group(1)[:60]  # Truncate long errors
+                    return f"Failed: {last_error}"
+                return "Failed: All extractors failed"
+            elif "Worker hung" in error_msg:
+                return "Failed: Worker timeout"
+            elif "Worker error" in error_msg:
+                return "Failed: Worker error"
+            else:
+                # Truncate long error messages
+                return f"Failed: {error_msg[:60]}"
         
         # Import worker function
         from .extract_worker import extract_file_worker
@@ -352,58 +420,93 @@ def extract(
         from .extract_worker import extract_file_for_pool
         
         # Test that worker function is importable and callable
-        import sys
         try:
             # Just verify it's a function
             if not callable(extract_file_for_pool):
                 raise ValueError("extract_file_for_pool is not callable")
-            print(f"DEBUG MAIN: Worker function imported successfully", file=sys.stderr, flush=True)
         except Exception as e:
             console.print(f"[bold red]Error: Failed to import worker function: {e}[/]")
             sys.exit(1)
 
         # Create worker status display
         worker_status = {}  # worker_id -> (file_name, status, elapsed_time)
-        
+
         def render_worker_status() -> Panel:
             """Render current status of all workers."""
             # Create table showing worker status
             table = Table.grid(padding=(0, 2))
             table.add_column("Worker", style="cyan", width=8)
-            table.add_column("Status", style="yellow", width=12)
-            table.add_column("File", style="white", width=60)
+            table.add_column("Status", style="yellow", width=15)
+            table.add_column("File", style="white", width=55)
             table.add_column("Time", style="dim", width=10)
-            
+
             # Show status for each worker slot
             for worker_id in range(workers):
                 if worker_id in worker_status:
                     file_name, status, elapsed = worker_status[worker_id]
+                    # Normalize status - remove "(slow)" suffix and handle it via color
+                    is_slow = "(slow)" in status
+                    base_status = status.replace(" (slow)", "").replace("(slow)", "")
+
                     status_color = {
-                        "processing": "yellow",
+                        "processing": "yellow" if not is_slow else "yellow3",
                         "completed": "green",
                         "hung": "red",
                         "idle": "dim"
-                    }.get(status, "white")
+                    }.get(base_status, "white")
+
+                    # Truncate file name to fit column
+                    display_name = file_name[:53] + "..." if len(file_name) > 53 else file_name
+
+                    # Format time with indicator for slow tasks
+                    time_str = f"{elapsed:.1f}s" if elapsed else "--"
+                    if is_slow and elapsed:
+                        time_str = f"[yellow]{time_str}[/]"
+
                     table.add_row(
                         f"#{worker_id+1}",
-                        f"[{status_color}]{status}[/]",
-                        file_name[:58] + "..." if len(file_name) > 58 else file_name,
-                        f"{elapsed:.1f}s" if elapsed else "--"
+                        f"[{status_color}]{base_status}[/]",
+                        display_name,
+                        time_str
                     )
                 else:
                     table.add_row(f"#{worker_id+1}", "[dim]idle[/]", "--", "--")
-            
-            # Overall stats
+
+            # Overall stats with breakdowns
             total_completed = stats["success"] + stats["failed"] + stats["skipped"]
             overall_pct = (total_completed / total_files * 100) if total_files > 0 else 0
-            
+
+            # Build detailed status text
+            status_lines = [
+                Text(f"Overall: {total_completed:,}/{total_files:,} ({overall_pct:.1f}%) | "
+                     f"Success: {stats['success']:,} | Failed: {stats['failed']:,} | Skipped: {stats['skipped']:,}")
+            ]
+
+            # Show top 3 success methods if any
+            if stats["success_methods"]:
+                top_methods = sorted(stats["success_methods"].items(), key=lambda x: x[1], reverse=True)[:3]
+                methods_str = ", ".join([f"{method}: {count}" for method, count in top_methods])
+                status_lines.append(Text(f"  Methods: {methods_str}", style="dim green"))
+
+            # Show top 3 skip reasons if any
+            if stats["skipped_reasons"]:
+                top_skips = sorted(stats["skipped_reasons"].items(), key=lambda x: x[1], reverse=True)[:3]
+                skips_str = ", ".join([f"{reason.replace('Skipped: ', '')}: {count}" for reason, count in top_skips])
+                status_lines.append(Text(f"  Skip: {skips_str}", style="dim yellow"))
+
+            # Show top 3 fail reasons if any
+            if stats["failed_reasons"]:
+                top_fails = sorted(stats["failed_reasons"].items(), key=lambda x: x[1], reverse=True)[:3]
+                fails_str = ", ".join([f"{reason.replace('Failed: ', '')[:30]}: {count}" for reason, count in top_fails])
+                status_lines.append(Text(f"  Fail: {fails_str}", style="dim red"))
+
             return Panel(
                 Group(
                     table,
-                    Text(f"\n[cyan]Overall: {total_completed:,}/{total_files:,} ({overall_pct:.1f}%) | "
-                         f"Success: {stats['success']:,} | Failed: {stats['failed']:,} | Skipped: {stats['skipped']:,}[/]")
+                    Text(""),  # Spacing
+                    *status_lines
                 ),
-                title="[bold cyan]Worker Status[/]",
+                title="Worker Status",
                 border_style="cyan"
             )
         
@@ -413,28 +516,37 @@ def extract(
             # Create a simple progress indicator
             total_completed = stats["success"] + stats["failed"] + stats["skipped"]
             overall_pct = (total_completed / total_files * 100) if total_files > 0 else 0
-            progress_text = Text(f"[cyan]Progress: {total_completed:,}/{total_files:,} ({overall_pct:.1f}%)[/]")
+            progress_text = Text(f"Progress: {total_completed:,}/{total_files:,} ({overall_pct:.1f}%)", style="cyan")
             
             return Group(
                 progress_text,
                 render_worker_status()
             )
         
-        with Live(render_display(), console=console, refresh_per_second=2) as live:
+        with Live(render_display(), console=console, refresh_per_second=4, screen=False) as live:
             # Use a continuous queue model: create ONE pool that persists, feed tasks continuously
             # Workers pick up new tasks as soon as they finish, maximizing utilization
-            import sys
             import queue as queue_module
             from collections import deque
-            
-            print(f"DEBUG MAIN: Creating persistent pool with {workers} workers", file=sys.stderr, flush=True)
-            with multiprocessing.Pool(processes=workers) as pool:
+
+            # Restart workers after N files to prevent memory accumulation
+            # This is critical for Docling which loads heavy ML models
+            # Workers grow from ~2GB -> ~5GB over 20 files, so restart frequently
+            # The timeout is long enough (10 min) that slow PDFs won't be interrupted
+            if config.extraction.use_docling:
+                maxtasksperchild = 20  # Restart worker after 20 files to keep memory in check
+            else:
+                maxtasksperchild = 200  # Can process more files without Docling
+
+            with multiprocessing.Pool(processes=workers, maxtasksperchild=maxtasksperchild) as pool:
                 # Track active jobs: async_result -> (file_info, submission_time, worker_slot)
                 active_jobs = {}  # Map async_result -> (file_info, submission_time, worker_slot)
                 worker_assignments = {}  # Map async_result -> worker_slot
                 next_worker_slot = 0
                 results_received = 0
-                HUNG_WORKER_TIMEOUT = 300.0  # 5 minutes - if a worker takes longer, consider it hung
+                # Docling can be slow on complex PDFs (OCR, tables, etc.)
+                # 10 minutes should be enough for even the most complex documents
+                HUNG_WORKER_TIMEOUT = 600.0  # 10 minutes - if a worker takes longer, consider it hung
                 
                 # Create a queue of pending tasks (file_info dicts)
                 task_queue = deque()
@@ -480,11 +592,8 @@ def extract(
                 for _ in range(min(workers, len(task_queue))):
                     submit_next_task()
                 
-                print(f"DEBUG MAIN: Started {len(active_jobs)} initial jobs, {len(task_queue)} tasks queued", file=sys.stderr, flush=True)
-                
                 # Main processing loop: continuously check for completed jobs and submit new ones
                 loop_iterations = 0
-                last_log_time = time.time()
                 batch_start_time = time.time()
                 batches_loaded = 1
                 
@@ -499,15 +608,8 @@ def extract(
                             for file_info in batch:
                                 task_queue.append(file_info)
                             batches_loaded += 1
-                            if batches_loaded % 10 == 0:
-                                print(f"DEBUG MAIN: Loaded {batches_loaded} batches, queue has {len(task_queue)} tasks", file=sys.stderr, flush=True)
                         except StopIteration:
                             pass  # No more batches, continue processing what's in queue
-                    
-                    # Log loop activity every 2 seconds
-                    if current_time - last_log_time > 2.0:
-                        print(f"DEBUG: Loop iteration #{loop_iterations}, {len(active_jobs)} active, {len(task_queue)} queued, {results_received} received", file=sys.stderr, flush=True)
-                        last_log_time = current_time
                     
                     # Check for completed results and immediately assign new work
                     completed_results = []
@@ -519,9 +621,12 @@ def extract(
                                 file_info, result_dict = async_result.get(timeout=0)
                                 completed_results.append((async_result, file_info, result_dict))
                             except multiprocessing.TimeoutError:
-                                print(f"DEBUG: Unexpected timeout getting result", file=sys.stderr, flush=True)
+                                pass  # Shouldn't happen with timeout=0
                             except Exception as e:
-                                print(f"DEBUG: Error getting result: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                                # Only log actual errors, not routine exceptions
+                                import sys
+                                if "Error retrieving result" not in str(e):
+                                    print(f"ERROR: Error getting result: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
                                 # Mark as failed
                                 if async_result in active_jobs:
                                     file_info, _, _ = active_jobs[async_result]
@@ -545,7 +650,7 @@ def extract(
                                     if elapsed > HUNG_WORKER_TIMEOUT:
                                         worker_status[worker_slot] = (file_path.name, "hung", elapsed)
                                         hung_workers.append((async_result, file_info, elapsed))
-                                    elif elapsed > 30.0:  # Show warning if taking > 30 seconds
+                                    elif elapsed > 120.0:  # Show warning if taking > 2 minutes
                                         worker_status[worker_slot] = (file_path.name, "processing (slow)", elapsed)
                                     else:
                                         worker_status[worker_slot] = (file_path.name, "processing", elapsed)
@@ -553,7 +658,10 @@ def extract(
                     # Handle hung workers - mark as failed and free up the worker slot
                     for async_result, file_info, elapsed in hung_workers:
                         file_path = Path(file_info["path"])
-                        print(f"WARNING: Worker hung on {file_path.name[:80]} after {elapsed:.1f}s - marking as failed", file=sys.stderr, flush=True)
+                        # Only log if truly hung (not just slow)
+                        if elapsed > HUNG_WORKER_TIMEOUT:
+                            import sys
+                            print(f"WARNING: Worker hung on {file_path.name[:80]} after {elapsed:.1f}s - marking as failed", file=sys.stderr, flush=True)
                         # Try to get the result one more time (non-blocking)
                         try:
                             if async_result.ready():
@@ -598,12 +706,9 @@ def extract(
                         if task_queue:
                             submit_next_task()
                         
-                        # Log every 100th result
-                        if results_received % 100 == 0:
-                            console.print(f"[dim]DEBUG: Received result #{results_received}: {file_path.name[:50]}[/]")
+                        # Removed verbose debug logging to avoid screen tear with Rich display
                         
                         # Record result in database
-                        db_start = time.time()
                         try:
                             database.record_extraction(
                                 file_id=file_info["id"],
@@ -613,17 +718,25 @@ def extract(
                                 output_path=result_dict["output_path"],
                                 error=result_dict["error"]
                             )
-                            db_time = time.time() - db_start
-                            if db_time > 0.1:  # Log slow DB writes
-                                console.print(f"[dim]DEBUG: Slow DB write: {db_time:.2f}s for {file_path.name[:50]}[/]")
                         except Exception as e:
                             console.print(f"[yellow]Warning: Failed to record extraction for {file_path.name}: {e}[/]")
 
-                        # Update stats
-                        stats[result_dict["status"]] += 1
+                        # Update stats with reasons
+                        status = result_dict["status"]
+                        stats[status] += 1
+
+                        if status == "success":
+                            method = result_dict["method"]
+                            stats["success_methods"][method] = stats["success_methods"].get(method, 0) + 1
+                        elif status == "skipped":
+                            reason = categorize_reason(result_dict.get("error", "Unknown"))
+                            stats["skipped_reasons"][reason] = stats["skipped_reasons"].get(reason, 0) + 1
+                        elif status == "failed":
+                            reason = categorize_reason(result_dict.get("error", "Unknown"))
+                            stats["failed_reasons"][reason] = stats["failed_reasons"].get(reason, 0) + 1
                     
-                    # Update worker status display
-                    if loop_iterations % 5 == 0 or completed_results:  # Update every 5 iterations or when results arrive
+                    # Update worker status display (less frequently to avoid redraw issues)
+                    if completed_results or loop_iterations % 10 == 0:  # Update when results arrive or every 10 iterations
                         live.update(render_display())
                     
                     # Sleep to allow workers to make progress and avoid busy-waiting
@@ -633,7 +746,6 @@ def extract(
                         time.sleep(0.1)  # Short sleep when waiting for results
                 
                 # Wait for any remaining active jobs to complete
-                print(f"DEBUG MAIN: Waiting for {len(active_jobs)} remaining jobs to complete", file=sys.stderr, flush=True)
                 while active_jobs:
                     current_time = time.time()
                     completed_results = []
@@ -644,7 +756,9 @@ def extract(
                                 file_info, result_dict = async_result.get(timeout=0)
                                 completed_results.append((async_result, file_info, result_dict))
                             except Exception as e:
-                                print(f"DEBUG: Error getting final result: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                                # Only log actual errors
+                                import sys
+                                print(f"ERROR: Error getting final result: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
                                 if async_result in active_jobs:
                                     file_info, _, _ = active_jobs[async_result]
                                     result_dict = {
@@ -683,8 +797,19 @@ def extract(
                         except Exception as e:
                             console.print(f"[yellow]Warning: Failed to record extraction for {file_path.name}: {e}[/]")
 
-                        # Update stats
-                        stats[result_dict["status"]] += 1
+                        # Update stats with reasons
+                        status = result_dict["status"]
+                        stats[status] += 1
+
+                        if status == "success":
+                            method = result_dict["method"]
+                            stats["success_methods"][method] = stats["success_methods"].get(method, 0) + 1
+                        elif status == "skipped":
+                            reason = categorize_reason(result_dict.get("error", "Unknown"))
+                            stats["skipped_reasons"][reason] = stats["skipped_reasons"].get(reason, 0) + 1
+                        elif status == "failed":
+                            reason = categorize_reason(result_dict.get("error", "Unknown"))
+                            stats["failed_reasons"][reason] = stats["failed_reasons"].get(reason, 0) + 1
                     
                     if completed_results:
                         live.update(render_display())
@@ -694,11 +819,77 @@ def extract(
                 # Force garbage collection
                 gc.collect()
 
-        # Display statistics
-        console.print(f"\n[bold green]✓ Extraction complete[/]")
-        console.print(f"  [green]Successful:[/] {stats['success']}")
-        console.print(f"  [yellow]Skipped:[/] {stats['skipped']}")
-        console.print(f"  [red]Failed:[/] {stats['failed']}")
+        # Display comprehensive statistics
+        console.print(f"\n[bold green]✓ Extraction complete[/]\n")
+
+        # Create summary table
+        summary_table = Table(title="Extraction Summary", show_header=True, header_style="bold cyan", width=100)
+        summary_table.add_column("Category", style="cyan", width=20)
+        summary_table.add_column("Count", justify="right", style="white", width=10)
+        summary_table.add_column("Details", style="dim", width=65)
+
+        # Add overall stats
+        total_processed = stats['success'] + stats['failed'] + stats['skipped']
+        summary_table.add_row(
+            "[bold]Total Processed[/]",
+            f"[bold]{total_processed:,}[/]",
+            ""
+        )
+
+        if previously_extracted > 0:
+            summary_table.add_row(
+                "Previously Extracted",
+                f"{previously_extracted:,}",
+                "[dim]Files already successfully extracted in prior runs[/]"
+            )
+
+        # Success breakdown
+        if stats['success'] > 0:
+            summary_table.add_row(
+                "[green]Successful[/]",
+                f"[green]{stats['success']:,}[/]",
+                ""
+            )
+            # Show method breakdown
+            for method, count in sorted(stats['success_methods'].items(), key=lambda x: x[1], reverse=True):
+                summary_table.add_row(
+                    "",
+                    f"[dim]{count:,}[/]",
+                    f"[dim green]→ via {method}[/]"
+                )
+
+        # Skipped breakdown
+        if stats['skipped'] > 0:
+            summary_table.add_row(
+                "[yellow]Skipped[/]",
+                f"[yellow]{stats['skipped']:,}[/]",
+                ""
+            )
+            # Show skip reasons
+            for reason, count in sorted(stats['skipped_reasons'].items(), key=lambda x: x[1], reverse=True):
+                summary_table.add_row(
+                    "",
+                    f"[dim]{count:,}[/]",
+                    f"[dim yellow]→ {reason.replace('Skipped: ', '')}[/]"
+                )
+
+        # Failed breakdown
+        if stats['failed'] > 0:
+            summary_table.add_row(
+                "[red]Failed[/]",
+                f"[red]{stats['failed']:,}[/]",
+                ""
+            )
+            # Show fail reasons
+            for reason, count in sorted(stats['failed_reasons'].items(), key=lambda x: x[1], reverse=True):
+                summary_table.add_row(
+                    "",
+                    f"[dim]{count:,}[/]",
+                    f"[dim red]→ {reason.replace('Failed: ', '')}[/]"
+                )
+
+        console.print(summary_table)
+        console.print()
 
         # Complete run
         database.complete_run(run_id)

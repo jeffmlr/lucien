@@ -6,6 +6,7 @@ from accumulating in the main process.
 """
 
 import contextlib
+import gc
 import io
 import os
 import sys
@@ -61,14 +62,34 @@ def extract_file_worker(
             file_path,
             file_info["sha256"]
         )
-        
-        # Return result as dictionary (serializable)
-        return {
+
+        # Prepare result as dictionary (serializable)
+        result_dict = {
             "status": result.status,
             "method": result.method,
             "output_path": str(result.output_path) if result.output_path else None,
             "error": result.error,
         }
+
+        # Clear result object explicitly
+        del result
+
+        # Force garbage collection to free memory immediately
+        # This is critical for Docling which loads heavy ML models
+        gc.collect()
+
+        # Clear torch cache if available (Docling uses torch)
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            # Also clear CPU cache
+            if hasattr(torch, 'mps') and torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        except ImportError:
+            pass  # torch not available, skip
+
+        return result_dict
     except Exception as e:
         # Catch any exception and return as failed
         return {
@@ -120,33 +141,28 @@ def extract_file_for_pool(args_tuple: tuple) -> tuple:
     """
     file_info_dict, config_path, db_path, extracted_text_dir = args_tuple
     
-    # Debug: Log that worker started (to stderr so it doesn't interfere with Rich)
-    import sys
-    file_path = Path(file_info_dict.get("path", "unknown"))
-    print(f"DEBUG WORKER: Starting extraction for {file_path.name}", file=sys.stderr, flush=True)
-    
     # Suppress stderr to prevent duplicate error messages from parallel workers
-    # PyPDF and other libraries print warnings/errors to stderr
-    # With multiple workers, we'd see the same error multiple times
-    # BUT: Don't suppress during initial setup to catch import/config errors
-    try:
-        result_dict = extract_file_worker(
-            file_info_dict,
-            config_path=config_path,
-            db_path=db_path,
-            extracted_text_dir=extracted_text_dir,
-        )
-        print(f"DEBUG WORKER: Completed {file_path.name} - status: {result_dict.get('status')}", file=sys.stderr, flush=True)
-        return (file_info_dict, result_dict)
-    except Exception as e:
-        # Log the error before returning
-        print(f"DEBUG WORKER: Exception in {file_path.name}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-        return (file_info_dict, {
-            "status": "failed",
-            "method": "unknown",
-            "output_path": None,
-            "error": f"Worker exception: {type(e).__name__}: {e}",
-        })
+    # PyPDF and other libraries print warnings/errors to stderr (e.g., "Ignoring wrong pointing object")
+    # With multiple workers, we'd see the same error multiple times and it causes screen tear with Rich
+    # Redirect stderr to /dev/null during extraction to keep the display clean
+    with open(os.devnull, 'w') as devnull:
+        with contextlib.redirect_stderr(devnull):
+            try:
+                result_dict = extract_file_worker(
+                    file_info_dict,
+                    config_path=config_path,
+                    db_path=db_path,
+                    extracted_text_dir=extracted_text_dir,
+                )
+                return (file_info_dict, result_dict)
+            except Exception as e:
+                # Errors are handled by returning failed status, no need to log here
+                return (file_info_dict, {
+                    "status": "failed",
+                    "method": "unknown",
+                    "output_path": None,
+                    "error": f"Worker exception: {type(e).__name__}: {e}",
+                })
 
 
 if __name__ == "__main__":

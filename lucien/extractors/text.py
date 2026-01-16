@@ -4,13 +4,14 @@ Plain text file extractor.
 Simple extractor for text-based files.
 """
 
+import chardet
 from pathlib import Path
 
-from . import TextExtractor, ExtractionResult
+from . import BaseExtractor, ExtractionResult
 
 
-class PlainTextExtractor(TextExtractor):
-    """Plain text file extractor."""
+class PlainTextExtractor(BaseExtractor):
+    """Plain text file extractor with encoding detection."""
 
     TEXT_EXTENSIONS = {
         ".txt", ".md", ".markdown", ".rst", ".log",
@@ -19,40 +20,51 @@ class PlainTextExtractor(TextExtractor):
         ".sh", ".bash", ".zsh", ".fish",
     }
 
+    @property
+    def name(self) -> str:
+        """Return the name of this extractor."""
+        return "text"
+
     def can_extract(self, file_path: Path) -> bool:
         """Check if file is a text file."""
         return file_path.suffix.lower() in self.TEXT_EXTENSIONS
 
-    def extract(self, file_path: Path) -> ExtractionResult:
-        """Extract text by reading file."""
+    def _detect_encoding(self, file_path: Path) -> str:
+        """Detect file encoding using chardet."""
         try:
-            # Try UTF-8 first
-            with open(file_path, "r", encoding="utf-8") as f:
-                text = f.read()
-            return ExtractionResult(
-                success=True,
-                text=text,
-                method="plaintext",
-            )
-        except UnicodeDecodeError:
-            # Try latin-1 as fallback
+            with open(file_path, "rb") as f:
+                raw_data = f.read(10000)  # Read first 10KB
+            result = chardet.detect(raw_data)
+            return result.get("encoding", "utf-8") or "utf-8"
+        except Exception:
+            return "utf-8"
+
+    def extract(self, file_path: Path) -> ExtractionResult:
+        """Extract text by reading file with encoding detection."""
+        try:
+            # Try UTF-8 first (most common)
             try:
-                with open(file_path, "r", encoding="latin-1") as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     text = f.read()
                 return ExtractionResult(
-                    success=True,
+                    status="success",
                     text=text,
-                    method="plaintext",
+                    method=self.name,
                 )
-            except Exception as e:
+            except UnicodeDecodeError:
+                # Use chardet for encoding detection
+                encoding = self._detect_encoding(file_path)
+                with open(file_path, "r", encoding=encoding, errors="replace") as f:
+                    text = f.read()
                 return ExtractionResult(
-                    success=False,
-                    error=f"Failed to read text file: {e}",
-                    method="plaintext",
+                    status="success",
+                    text=text,
+                    method=self.name,
+                    metadata={"encoding": encoding}
                 )
         except Exception as e:
             return ExtractionResult(
-                success=False,
+                status="failed",
                 error=f"Failed to read file: {e}",
-                method="plaintext",
+                method=self.name,
             )

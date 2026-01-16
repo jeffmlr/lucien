@@ -45,6 +45,10 @@ class ExtractionSettings(BaseModel):
         description="Extraction methods to try in order"
     )
     max_text_length: int = Field(default=50000, description="Maximum text length to extract (chars)")
+    use_docling: bool = Field(
+        default=True,
+        description="Use Docling for extraction (high quality but memory intensive ~10GB per worker)"
+    )
 
 
 class TaxonomySettings(BaseModel):

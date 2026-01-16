@@ -6,27 +6,28 @@ from various document formats.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Type
 
 
+@dataclass
 class ExtractionResult:
     """Result of text extraction operation."""
+    status: str  # 'success', 'failed', 'skipped'
+    method: str  # 'docling', 'pypdf', 'text', etc.
+    text: Optional[str] = None
+    output_path: Optional[Path] = None
+    error: Optional[str] = None
+    metadata: Dict[str, str] = field(default_factory=dict)
 
-    def __init__(
-        self,
-        success: bool,
-        text: Optional[str] = None,
-        method: str = "unknown",
-        error: Optional[str] = None,
-    ):
-        self.success = success
-        self.text = text
-        self.method = method
-        self.error = error
+    @property
+    def success(self) -> bool:
+        """Compatibility property for success status."""
+        return self.status == "success"
 
 
-class TextExtractor(ABC):
+class BaseExtractor(ABC):
     """Abstract base class for text extractors."""
 
     @abstractmethod
@@ -39,5 +40,39 @@ class TextExtractor(ABC):
         """Extract text from file."""
         pass
 
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Return the name of this extractor."""
+        pass
 
-__all__ = ["TextExtractor", "ExtractionResult"]
+
+class ExtractorRegistry:
+    """Registry for managing multiple extractors."""
+
+    def __init__(self):
+        self._extractors: List[BaseExtractor] = []
+
+    def register(self, extractor: BaseExtractor) -> None:
+        """Register an extractor."""
+        self._extractors.append(extractor)
+
+    def get_extractors_for_file(self, file_path: Path) -> List[BaseExtractor]:
+        """Get all extractors that can handle the file."""
+        return [ext for ext in self._extractors if ext.can_extract(file_path)]
+
+    def get_all_extractors(self) -> List[BaseExtractor]:
+        """Get all registered extractors."""
+        return self._extractors.copy()
+
+
+# Global registry instance
+_registry = ExtractorRegistry()
+
+
+def get_registry() -> ExtractorRegistry:
+    """Get the global extractor registry."""
+    return _registry
+
+
+__all__ = ["BaseExtractor", "ExtractionResult", "ExtractorRegistry", "get_registry"]

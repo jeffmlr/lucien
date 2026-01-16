@@ -137,20 +137,20 @@ class FileScanner:
                 TaskProgressColumn(),
                 TextColumn("[cyan]{task.fields[current_file]}"),
             ) as progress:
-                # First pass: count files
+                # First pass: count files (memory-efficient, just counting)
                 task = progress.add_task(
                     "[cyan]Counting files...",
                     total=None,
                     current_file=""
                 )
 
-                files = list(self.iter_files(root_path))
-                total = len(files)
+                # Count files without loading all paths into memory
+                total = sum(1 for _ in self.iter_files(root_path))
 
                 progress.update(task, description=f"[cyan]Scanning {total} files...", total=total)
 
-                # Second pass: scan and index
-                for file_path in files:
+                # Second pass: scan and index (process incrementally)
+                for file_path in self.iter_files(root_path):
                     progress.update(task, current_file=str(file_path.name))
 
                     file_record = self.scan_file(file_path, run_id)
