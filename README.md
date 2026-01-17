@@ -20,16 +20,16 @@ Lucien is a Mac-first, open-source document library builder that transforms **im
 
 ## Status
 
-**Current Version**: v0.1.0 (Alpha)
+**Current Version**: v0.2.0 (Alpha)
 
 **What's Working**:
 - ✅ Phase 0: File scanning and indexing
+- ✅ Phase 1: Text extraction (Docling, pypdf, textract)
+- ✅ Phase 2: AI labeling (LM Studio integration)
 - ✅ Configuration management
 - ✅ CLI framework
 
 **In Development** (see [Milestones](#milestones)):
-- ⏳ Phase 1: Text extraction (Milestone 2)
-- ⏳ Phase 2: AI labeling (Milestone 3)
 - ⏳ Phase 3-4: Planning and materialization (Milestone 4)
 
 ## Quick Start
@@ -38,7 +38,10 @@ Lucien is a Mac-first, open-source document library builder that transforms **im
 
 1. **macOS** (Apple Silicon or Intel)
 2. **Python 3.11+**
-3. **LM Studio** with Qwen2.5 models (for AI labeling, Milestone 3)
+3. **LM Studio** with Qwen2.5 models (for AI labeling)
+   - Download from [lmstudio.ai](https://lmstudio.ai/)
+   - Install `qwen2.5-7b-instruct` (default) and optionally `qwen2.5-14b-instruct` (escalation)
+   - Enable the local server (default: `http://localhost:1234`)
 
 ### Installation
 
@@ -68,12 +71,16 @@ vim lucien.yaml
 # 3. Scan your backup
 lucien scan /path/to/backup
 
-# 4. Check statistics
+# 4. Extract text from documents
+lucien extract
+
+# 5. Label documents with AI (requires LM Studio running)
+lucien label
+
+# 6. Check statistics
 lucien stats
 
-# Future: Extract text, label, plan, and materialize
-# lucien extract
-# lucien label
+# Future: Plan and materialize
 # lucien plan
 # lucien materialize plan.jsonl
 ```
@@ -144,6 +151,42 @@ taxonomy:
 
 See [example configuration](lucien.example.yaml) for full options.
 
+## AI Labeling
+
+Lucien uses local LLMs via LM Studio for intelligent document classification. No data leaves your machine.
+
+### LM Studio Setup
+
+1. **Download LM Studio** from [lmstudio.ai](https://lmstudio.ai/)
+2. **Install recommended models**:
+   - `qwen2.5-7b-instruct` - Default model for general labeling
+   - `qwen2.5-14b-instruct` - Escalation model for complex/sensitive docs
+3. **Enable local server**: Settings → Local Server → Enable
+4. **Load a model**: Models → Load the model you want to use
+
+### Model Escalation
+
+Lucien uses a two-tier model approach:
+
+1. **Default model** (`qwen2.5-7b-instruct`): Fast, handles most documents
+2. **Escalation model** (`qwen2.5-14b-instruct`): Used when:
+   - Confidence score < 0.7 (configurable)
+   - Document type is sensitive (taxes, medical, legal, insurance)
+   - Critical fields (date, issuer) are missing for financial/legal docs
+
+This balances speed with accuracy for important documents.
+
+### What Gets Labeled
+
+For each document, the LLM extracts:
+- **Document type**: From controlled vocabulary (w2, bank_statement, medical, etc.)
+- **Title**: Human-readable description
+- **Canonical filename**: Standardized naming following conventions
+- **Tags**: Domain, document type, provider, and status tags
+- **Target path**: Taxonomy folder for organization
+- **Date & Issuer**: When discernible from the document
+- **Confidence score**: 0.0-1.0 indicating certainty
+
 ### Directory Structure
 
 Lucien stores all application data in `~/.lucien/`:
@@ -198,15 +241,39 @@ Create a configuration file with defaults.
 - `--output`: Output path (default: `./lucien.yaml`)
 - `--user`: Create user config at `~/.config/lucien/config.yaml`
 
+### Phase 1: Extract Text
+
+```bash
+lucien extract [--db <path>] [--limit <n>] [--force] [--workers <n>]
+```
+
+Extracts text from documents using Docling (primary), pypdf, or textract fallbacks.
+
+**Options**:
+- `--db`: Override database path
+- `--limit`: Process only N files (for testing)
+- `--force`: Re-extract already processed files
+- `--workers`: Number of parallel workers (default: 4)
+
+### Phase 2: AI Label
+
+```bash
+lucien label [--db <path>] [--model <name>] [--limit <n>] [--force] [--no-escalate]
+```
+
+Labels documents using local LLMs via LM Studio.
+
+**Options**:
+- `--model`: Override default model name
+- `--limit`: Process only N files (for testing)
+- `--force`: Re-label already processed files
+- `--no-escalate`: Disable automatic model escalation
+
+**Requirements**: LM Studio must be running with models loaded.
+
 ### Future Commands
 
 ```bash
-# Phase 1: Text Extraction (Milestone 2)
-lucien extract [--db <path>] [--output <dir>]
-
-# Phase 2: AI Labeling (Milestone 3)
-lucien label [--db <path>] [--model <name>]
-
 # Phase 3: Plan Generation (Milestone 4)
 lucien plan [--db <path>] [--output <dir>]
 
@@ -219,37 +286,44 @@ lucien materialize <plan_file> [--staging <dir>] [--mode copy|hardlink] [--apply
 Lucien generates canonical filenames following this pattern:
 
 ```
-YYYY-MM-DD__Domain__Issuer__Title.ext
+YYYY-MM-DD-Category-Issuer-Description.ext
 ```
 
-Examples:
-- `2024-03-15__Financial__Chase__Checking-Statement.pdf`
-- `2023-12-31__Taxes__IRS__1040-Form.pdf`
-- `2024-01-10__Medical__Kaiser__Lab-Results.pdf`
+- Use **hyphens** (`-`) to separate the four main fields
+- Use **underscores** (`_`) within multi-word values
 
+Examples:
+- `2024-03-15-Financial-Chase_Bank-Statement.pdf`
+- `2023-12-31-Taxes-IRS-1040_Form.pdf`
+- `2024-01-10-Medical-Kaiser-Lab_Results_Jeff.pdf`
+- `2024-05-17-Insurance-Unum-LTC_Claim_Nancy.pdf`
+
+Family member names are appended when documents are person-specific.
 Format is configurable in `lucien.yaml`.
 
 ## Milestones
 
-### ✅ Milestone 1: Core Pipeline (v0.1) - CURRENT
+### ✅ Milestone 1: Core Pipeline (v0.1)
 - [x] Phase 0: Scan/Index working
 - [x] SQLite schema implemented with migrations
 - [x] CLI: `scan` command end-to-end
 - [x] Config loading from YAML
 - [x] Basic logging and progress bars
 
-### Milestone 2: Text Extraction (v0.2)
-- [ ] Phase 1: Text extraction with Docling
-- [ ] Fallback to pypdf for simple PDFs
-- [ ] CLI: `extract` command
-- [ ] Sidecar file management
+### ✅ Milestone 2: Text Extraction (v0.2)
+- [x] Phase 1: Text extraction with Docling
+- [x] Fallback to pypdf for simple PDFs
+- [x] Fallback to textract for other formats
+- [x] CLI: `extract` command
+- [x] Sidecar file management (gzip compressed)
 
-### Milestone 3: AI Labeling (v0.3)
-- [ ] Phase 2: LM Studio client implementation
-- [ ] Prompt engineering for labeling
-- [ ] JSON schema validation
-- [ ] CLI: `label` command
-- [ ] Escalation logic
+### ✅ Milestone 3: AI Labeling (v0.3) - CURRENT
+- [x] Phase 2: LM Studio client implementation
+- [x] Prompt engineering for labeling
+- [x] Pydantic schema validation
+- [x] CLI: `label` command with progress display
+- [x] Two-tier model escalation (confidence + doc type)
+- [x] Family member attribution in filenames
 
 ### Milestone 4: Planning & Materialization (v0.4)
 - [ ] Phase 3: Plan generation (JSONL, CSV)
@@ -307,9 +381,10 @@ lucien/
 │   └── text.py
 ├── llm/                 # Phase 2: AI labeling
 │   ├── __init__.py
-│   ├── client.py
-│   ├── models.py
-│   └── prompts.py
+│   ├── client.py        # LM Studio client
+│   ├── models.py        # Pydantic schemas
+│   ├── pipeline.py      # Labeling orchestration
+│   └── prompts.py       # Prompt templates
 ├── planner.py           # Phase 3: Plan generation
 ├── materialize.py       # Phase 4: Staging mirror
 └── tags_macos.py        # macOS Finder tags

@@ -50,10 +50,10 @@ llm:
     - insurance
 
   # Maximum retry attempts for LLM calls
-  max_retries: 3
+  max_retries: 2
 
   # Timeout for LLM calls (seconds)
-  timeout: 120
+  timeout: 30
 
 # =============================================================================
 # Text Extraction Settings
@@ -108,6 +108,14 @@ taxonomy:
     - "10 Family Photos & Media"
     - "98 Uncategorized"
     - "99 Needs Review"
+
+  # Family member names for document attribution (first names only)
+  # Used in canonical filenames when documents are person-specific
+  family_members:
+    - Ben
+    - Nancy
+    - Jeff
+    - Jamie
 
 # =============================================================================
 # Controlled Vocabularies
@@ -192,28 +200,35 @@ doc_types:
   - uncategorized
 
 # Tags (suggested tags vocabulary - user-extendable)
+# Providers and years are added dynamically based on document content
 tags:
+  # Domain tags
+  - finances
+  - healthcare
+  - taxes
+  - utilities
+  - dental
+  - investment
+  - insurance
+  - legal
+
+  # Document type tags
+  - receipt
+  - invoice
+  - payment
+  - bills
+  - form:1099
+  - form:w2
+  - statement
+
   # Status tags
-  - important
-  - action-required
   - archived
-  - completed
-  - pending
-
-  # Financial tags
-  - tax-deductible
-  - warranty
+  - action_required
   - recurring
-  - paid
-  - unpaid
 
-  # Project tags (add your own)
-  # - project-name
-  # - client-name
-
-  # Year tags (add as needed)
+  # Year tags (add as needed for filtering)
   # - 2024
-  # - 2023
+  # - 2025
 
 # =============================================================================
 # Naming Conventions
@@ -221,11 +236,14 @@ tags:
 
 naming:
   # Canonical filename format template
-  # Placeholders: YYYY, MM, DD, Domain, Issuer, Title
-  format: "YYYY-MM-DD__Domain__Issuer__Title"
+  # Placeholders: YYYY, MM, DD, Category, Issuer, Title
+  format: "YYYY-MM-DD-Category-Issuer-Title"
 
-  # Field separator in filenames
-  separator: "__"
+  # Field separator between main sections (date-category-issuer-title)
+  separator: "-"
+
+  # Word separator within multi-word field values (e.g., Chase_Bank, Utility_Bill)
+  word_separator: "_"
 
   # Date format (strftime)
   date_format: "%Y-%m-%d"
