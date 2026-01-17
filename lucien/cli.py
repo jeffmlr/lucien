@@ -917,17 +917,300 @@ def label(
     model: Optional[str] = typer.Option(
         None,
         "--model",
-        help="Model name to use (default: from config)",
+        help="Override default model name",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-label files that were already labeled",
+    ),
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        help="Limit number of files to label (for testing)",
+    ),
+    no_escalate: bool = typer.Option(
+        False,
+        "--no-escalate",
+        help="Disable automatic model escalation",
     ),
 ):
     """
-    Phase 2: AI labeling with LLM (NOT YET IMPLEMENTED).
+    Phase 2: AI labeling with LLM.
 
-    Uses LM Studio to label and categorize documents.
+    Uses LM Studio to label and categorize documents based on their
+    extracted text. Requires LM Studio to be running with a model loaded.
     """
-    console.print("[yellow]⚠ AI labeling not yet implemented[/]")
-    console.print("This will be part of Milestone 3 (v0.3)")
-    sys.exit(1)
+    try:
+        from .llm import LabelingPipeline
+
+        # Load config
+        if config_file:
+            config = LucienSettings.load_from_yaml(config_file)
+        else:
+            config = LucienSettings.load()
+
+        # Override settings
+        if db:
+            config.index_db = db
+        if model:
+            config.llm.default_model = model
+
+        # Ensure directories exist
+        config.ensure_directories()
+
+        # Initialize database
+        database = Database(config.index_db)
+
+        # Initialize pipeline
+        pipeline = LabelingPipeline(config, database)
+
+        # Check LM Studio connection
+        console.print(f"\n[bold cyan]Checking LM Studio connection...[/]")
+        success, message = pipeline.check_lm_studio_connection()
+        if not success:
+            console.print(f"[bold red]Error:[/] {message}")
+            console.print("\n[yellow]To fix this:[/]")
+            console.print("1. Start LM Studio")
+            console.print("2. Load a model (e.g., qwen2.5-7b-instruct)")
+            console.print("3. Enable the local server in LM Studio settings")
+            sys.exit(1)
+
+        console.print(f"[green]✓[/] {message}")
+
+        # Count files to process
+        total_files = pipeline.count_files_for_labeling(force=force)
+        if limit:
+            total_files = min(total_files, limit)
+
+        console.print(f"\n[bold cyan]Starting AI labeling[/]")
+        console.print(f"[bold cyan]Database:[/] {config.index_db}")
+        console.print(f"[bold cyan]Default model:[/] {config.llm.default_model}")
+        console.print(f"[bold cyan]Escalation model:[/] {config.llm.escalation_model}")
+        console.print(f"[bold cyan]Escalation threshold:[/] {config.llm.escalation_threshold}")
+        if limit:
+            console.print(f"[yellow]Limit: Processing first {limit} files[/]")
+        if no_escalate:
+            console.print("[yellow]Escalation disabled[/]")
+        if force:
+            console.print("[yellow]Force mode: Re-labeling all files[/]")
+
+        if total_files == 0:
+            console.print("\n[green]✓ No files need labeling[/]")
+            console.print("[dim]All extracted files already have labels. Use --force to re-label.[/]")
+            sys.exit(0)
+
+        console.print(f"\n[bold]Files to label: {total_files:,}[/]\n")
+
+        # Create labeling run
+        run_id = database.create_run("label", config.model_dump(mode="json"))
+
+        # Get files to label
+        files = pipeline.get_files_for_labeling(force=force, limit=limit)
+
+        # Track statistics
+        stats = {
+            "success": 0,
+            "failed": 0,
+            "escalated": 0,
+            "by_doc_type": {},
+            "errors": [],
+        }
+
+        # Track last result for display
+        last_result = {
+            "file": None,
+            "label": None,  # Full LabelOutput object
+            "escalated": False,
+            "error": None,
+        }
+        current_file = {"name": None}
+
+        def render_label_status() -> Panel:
+            """Render current labeling status."""
+            # Main status table
+            table = Table.grid(padding=(0, 2))
+            table.add_column("Label", style="cyan", width=18)
+            table.add_column("Value", style="white", width=90)
+
+            # Current file being processed
+            if current_file["name"]:
+                display_name = current_file["name"][:85] + "..." if len(current_file["name"]) > 85 else current_file["name"]
+                table.add_row("Processing:", f"[yellow]{display_name}[/]")
+            else:
+                table.add_row("Processing:", "[dim]waiting...[/]")
+
+            # Last result - detailed view
+            if last_result["file"]:
+                display_name = last_result["file"][:85] + "..." if len(last_result["file"]) > 85 else last_result["file"]
+
+                if last_result["error"]:
+                    table.add_row("", "")  # Spacer
+                    table.add_row("[bold]Last Result:[/]", f"[red]{display_name}[/]")
+                    table.add_row("Error:", f"[red]{last_result['error'][:80]}[/]")
+                else:
+                    label = last_result["label"]
+                    escalated = last_result["escalated"]
+
+                    # Confidence color
+                    conf = label.confidence
+                    if conf >= 0.85:
+                        conf_style = "bold green"
+                    elif conf >= 0.7:
+                        conf_style = "green"
+                    else:
+                        conf_style = "yellow"
+
+                    table.add_row("", "")  # Spacer
+                    table.add_row("[bold]Last Result:[/]", f"[green]{display_name}[/]")
+
+                    # Type and confidence with escalation marker
+                    escalate_marker = " [yellow](escalated)[/]" if escalated else ""
+                    table.add_row("Type:", f"[bold]{label.doc_type}[/]{escalate_marker}")
+                    table.add_row("Confidence:", f"[{conf_style}]{conf:.0%}[/]")
+
+                    # Title
+                    title_display = label.title[:85] + "..." if len(label.title) > 85 else label.title
+                    table.add_row("Title:", title_display)
+
+                    # Canonical filename
+                    filename_display = label.canonical_filename[:85] + "..." if len(label.canonical_filename) > 85 else label.canonical_filename
+                    table.add_row("Filename:", f"[dim]{filename_display}[/]")
+
+                    # Target path
+                    table.add_row("Target:", f"[cyan]{label.target_group_path}[/]")
+
+                    # Date and issuer on same line if both present
+                    meta_parts = []
+                    if label.date:
+                        meta_parts.append(f"[white]{label.date}[/]")
+                    if label.issuer:
+                        meta_parts.append(f"[white]{label.issuer}[/]")
+                    if meta_parts:
+                        table.add_row("Date/Issuer:", " | ".join(meta_parts))
+
+                    # Tags
+                    if label.suggested_tags:
+                        tags_str = ", ".join(label.suggested_tags[:6])
+                        if len(label.suggested_tags) > 6:
+                            tags_str += f" (+{len(label.suggested_tags) - 6} more)"
+                        table.add_row("Tags:", f"[magenta]{tags_str}[/]")
+
+                    # Why (reasoning) - truncated
+                    why_display = label.why[:100] + "..." if len(label.why) > 100 else label.why
+                    table.add_row("Why:", f"[dim italic]{why_display}[/]")
+            else:
+                table.add_row("", "")
+                table.add_row("[bold]Last Result:[/]", "[dim]--[/]")
+
+            # Overall stats
+            total_completed = stats["success"] + stats["failed"]
+            overall_pct = (total_completed / total_files * 100) if total_files > 0 else 0
+
+            status_lines = [
+                Text(""),  # Spacer
+                Text(f"Progress: {total_completed:,}/{total_files:,} ({overall_pct:.1f}%) | "
+                     f"Success: {stats['success']:,} | Failed: {stats['failed']:,} | Escalated: {stats['escalated']:,}",
+                     style="bold")
+            ]
+
+            # Show top doc types if any
+            if stats["by_doc_type"]:
+                top_types = sorted(stats["by_doc_type"].items(), key=lambda x: x[1], reverse=True)[:5]
+                types_str = ", ".join([f"{dtype}: {count}" for dtype, count in top_types])
+                status_lines.append(Text(f"  Types: {types_str}", style="dim green"))
+
+            return Panel(
+                Group(
+                    table,
+                    *status_lines
+                ),
+                title="Labeling Status",
+                border_style="cyan"
+            )
+
+        with Live(render_label_status(), console=console, refresh_per_second=4, screen=False) as live:
+            for file_info in files:
+                file_path = Path(file_info["path"])
+                current_file["name"] = file_path.name
+                live.update(render_label_status())
+
+                # Label the file
+                label_result, escalated, error = pipeline.label_file(
+                    file_info,
+                    run_id,
+                    use_escalation=not no_escalate,
+                )
+
+                # Update last result
+                last_result["file"] = file_path.name
+                last_result["error"] = error
+
+                if error:
+                    stats["failed"] += 1
+                    stats["errors"].append((file_path.name, error))
+                    last_result["label"] = None
+                    last_result["escalated"] = False
+                else:
+                    stats["success"] += 1
+                    if escalated:
+                        stats["escalated"] += 1
+                    # Track doc types
+                    doc_type = label_result.doc_type
+                    stats["by_doc_type"][doc_type] = stats["by_doc_type"].get(doc_type, 0) + 1
+                    last_result["label"] = label_result
+                    last_result["escalated"] = escalated
+
+                live.update(render_label_status())
+
+        # Complete run
+        database.complete_run(run_id)
+
+        # Display results
+        console.print(f"\n[bold green]✓ Labeling complete[/]\n")
+
+        # Summary table
+        summary_table = Table(title="Labeling Summary", show_header=True, header_style="bold cyan")
+        summary_table.add_column("Metric", style="cyan")
+        summary_table.add_column("Count", justify="right", style="green")
+
+        summary_table.add_row("Total Processed", str(stats["success"] + stats["failed"]))
+        summary_table.add_row("[green]Successful[/]", f"[green]{stats['success']}[/]")
+        summary_table.add_row("[yellow]Escalated[/]", f"[yellow]{stats['escalated']}[/]")
+        summary_table.add_row("[red]Failed[/]", f"[red]{stats['failed']}[/]")
+
+        console.print(summary_table)
+
+        # Doc type breakdown
+        if stats["by_doc_type"]:
+            console.print("\n[bold cyan]Document Types:[/]")
+            sorted_types = sorted(stats["by_doc_type"].items(), key=lambda x: x[1], reverse=True)
+            for doc_type, count in sorted_types[:10]:  # Top 10
+                console.print(f"  {doc_type}: {count}")
+            if len(sorted_types) > 10:
+                console.print(f"  ... and {len(sorted_types) - 10} more types")
+
+        # Show errors if any
+        if stats["errors"]:
+            console.print(f"\n[bold red]Errors ({len(stats['errors'])}):[/]")
+            for filename, error in stats["errors"][:5]:
+                console.print(f"  {filename}: {error[:60]}")
+            if len(stats["errors"]) > 5:
+                console.print(f"  ... and {len(stats['errors']) - 5} more errors")
+
+        # Show sample results
+        console.print("\n[bold cyan]Sample Results:[/]")
+        labeling_stats = database.get_labeling_stats(run_id)
+        console.print(f"  Average confidence: {labeling_stats['confidence']['avg']:.2f}")
+        console.print(f"  Low confidence (<0.7): {labeling_stats['low_confidence_count']}")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        import traceback
+        traceback.print_exc()
+        if 'database' in locals() and 'run_id' in locals():
+            database.complete_run(run_id, error=str(e))
+        sys.exit(1)
 
 
 @app.command()

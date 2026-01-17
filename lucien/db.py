@@ -691,6 +691,197 @@ class Database:
             cursor = conn.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
 
+    # Labeling operations
+    def get_files_for_labeling(
+        self,
+        force: bool = False,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get files that need labeling (have successful extraction but no label).
+
+        Args:
+            force: If True, include all files with extraction (even if already labeled)
+            limit: Maximum number of files to return
+
+        Returns:
+            List of file records with extraction info
+        """
+        with self._get_connection() as conn:
+            if force:
+                # Get all files with successful extraction (deduplicated by file_id)
+                query = """
+                    SELECT f.id, f.path, f.sha256, f.size, f.mime_type, f.mtime,
+                           MAX(e.output_path) as extraction_path, MAX(e.method) as extraction_method
+                    FROM files f
+                    INNER JOIN extractions e ON f.id = e.file_id AND e.status = 'success'
+                    GROUP BY f.id
+                    ORDER BY f.path
+                """
+                params = []
+            else:
+                # Get files with extraction but no label (deduplicated by file_id)
+                query = """
+                    SELECT f.id, f.path, f.sha256, f.size, f.mime_type, f.mtime,
+                           MAX(e.output_path) as extraction_path, MAX(e.method) as extraction_method
+                    FROM files f
+                    INNER JOIN extractions e ON f.id = e.file_id AND e.status = 'success'
+                    LEFT JOIN labels l ON f.id = l.file_id
+                    WHERE l.id IS NULL
+                    GROUP BY f.id
+                    ORDER BY f.path
+                """
+                params = []
+
+            if limit:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            cursor = conn.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def count_files_for_labeling(self, force: bool = False) -> int:
+        """
+        Count files that need labeling.
+
+        Args:
+            force: If True, count all files with extraction
+
+        Returns:
+            Number of files needing labeling
+        """
+        with self._get_connection() as conn:
+            if force:
+                query = """
+                    SELECT COUNT(DISTINCT f.id)
+                    FROM files f
+                    INNER JOIN extractions e ON f.id = e.file_id AND e.status = 'success'
+                """
+            else:
+                query = """
+                    SELECT COUNT(DISTINCT f.id)
+                    FROM files f
+                    INNER JOIN extractions e ON f.id = e.file_id AND e.status = 'success'
+                    LEFT JOIN labels l ON f.id = l.file_id
+                    WHERE l.id IS NULL
+                """
+            cursor = conn.execute(query)
+            return cursor.fetchone()[0]
+
+    def get_labeling_stats(self, run_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Get labeling statistics.
+
+        Args:
+            run_id: Optional run ID to filter stats
+
+        Returns:
+            Dictionary with labeling counts and breakdowns
+        """
+        with self._get_connection() as conn:
+            stats = {}
+
+            # Base query filter
+            run_filter = "WHERE labeling_run_id = ?" if run_id else ""
+            params = (run_id,) if run_id else ()
+
+            # Total labels
+            cursor = conn.execute(f"SELECT COUNT(*) FROM labels {run_filter}", params)
+            stats["total"] = cursor.fetchone()[0]
+
+            # By doc_type
+            cursor = conn.execute(
+                f"SELECT doc_type, COUNT(*) as count FROM labels {run_filter} GROUP BY doc_type ORDER BY count DESC",
+                params
+            )
+            stats["by_doc_type"] = {row["doc_type"]: row["count"] for row in cursor.fetchall()}
+
+            # By model
+            cursor = conn.execute(
+                f"SELECT model_name, COUNT(*) as count FROM labels {run_filter} GROUP BY model_name",
+                params
+            )
+            stats["by_model"] = {row["model_name"]: row["count"] for row in cursor.fetchall()}
+
+            # Confidence distribution
+            cursor = conn.execute(
+                f"SELECT AVG(confidence) as avg_conf, MIN(confidence) as min_conf, MAX(confidence) as max_conf FROM labels {run_filter}",
+                params
+            )
+            row = cursor.fetchone()
+            if row and row["avg_conf"] is not None:
+                stats["confidence"] = {
+                    "avg": round(row["avg_conf"], 3),
+                    "min": round(row["min_conf"], 3),
+                    "max": round(row["max_conf"], 3),
+                }
+            else:
+                stats["confidence"] = {"avg": 0, "min": 0, "max": 0}
+
+            # Low confidence count (< 0.7)
+            cursor = conn.execute(
+                f"SELECT COUNT(*) FROM labels WHERE confidence < 0.7 {('AND labeling_run_id = ?' if run_id else '')}",
+                params
+            )
+            stats["low_confidence_count"] = cursor.fetchone()[0]
+
+            return stats
+
+    def record_label(
+        self,
+        file_id: int,
+        run_id: int,
+        doc_type: str,
+        title: str,
+        canonical_filename: str,
+        suggested_tags: List[str],
+        target_group_path: str,
+        confidence: float,
+        why: str,
+        model_name: str,
+        prompt_hash: str,
+        date: Optional[str] = None,
+        issuer: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> int:
+        """
+        Record a labeling result.
+
+        Returns:
+            Label record ID
+        """
+        label = LabelRecord(
+            file_id=file_id,
+            doc_type=doc_type,
+            title=title,
+            canonical_filename=canonical_filename,
+            suggested_tags=suggested_tags,
+            target_group_path=target_group_path,
+            date=date,
+            issuer=issuer,
+            source=source,
+            confidence=confidence,
+            why=why,
+            model_name=model_name,
+            prompt_hash=prompt_hash,
+            labeling_run_id=run_id,
+        )
+        return self.insert_label(label)
+
+    def get_latest_label(self, file_id: int) -> Optional[LabelRecord]:
+        """Get the most recent label for a file."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM labels WHERE file_id = ? ORDER BY created_at DESC LIMIT 1",
+                (file_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                data = dict(row)
+                data["suggested_tags"] = json.loads(data["suggested_tags"]) if data["suggested_tags"] else []
+                return LabelRecord(**data)
+            return None
+
     # Statistics and queries
     def get_stats(self) -> Dict[str, Any]:
         """Get database statistics."""

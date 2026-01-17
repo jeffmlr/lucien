@@ -66,3 +66,4 @@ class LabelingContext(BaseModel):
     available_doc_types: List[str]
     available_tags: List[str]
     taxonomy: List[str]
+    family_members: List[str] = []

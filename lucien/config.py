@@ -29,8 +29,8 @@ class LLMSettings(BaseModel):
         default_factory=lambda: ["taxes", "medical", "legal", "insurance"],
         description="Doc types that always use escalation model"
     )
-    max_retries: int = Field(default=3, description="Maximum retry attempts for LLM calls")
-    timeout: int = Field(default=120, description="Timeout in seconds for LLM calls")
+    max_retries: int = Field(default=2, description="Maximum retry attempts for LLM calls")
+    timeout: int = Field(default=30, description="Timeout in seconds for LLM calls")
 
 
 class ExtractionSettings(BaseModel):
@@ -72,12 +72,18 @@ class TaxonomySettings(BaseModel):
         description="Top-level taxonomy folders"
     )
 
+    family_members: List[str] = Field(
+        default_factory=lambda: ["Ben", "Nancy", "Jeff", "Jamie"],
+        description="Family member names for document attribution"
+    )
+
 
 class NamingSettings(BaseModel):
     """Canonical filename naming configuration."""
 
-    format: str = Field(default="YYYY-MM-DD__Domain__Issuer__Title", description="Filename format template")
-    separator: str = Field(default="__", description="Field separator in filenames")
+    format: str = Field(default="YYYY-MM-DD-Category-Issuer-Title", description="Filename format template")
+    separator: str = Field(default="-", description="Field separator in filenames")
+    word_separator: str = Field(default="_", description="Separator within multi-word field values")
     date_format: str = Field(default="%Y-%m-%d", description="Date format (strftime)")
 
 
@@ -143,16 +149,29 @@ class LucienSettings(BaseSettings):
     # Controlled vocabularies
     doc_types: List[str] = Field(
         default_factory=lambda: [
-            "identity", "legal", "contract", "deed", "will",
+            # Identity & Legal
+            "identity", "legal", "contract", "deed", "will", "membership",
+            # Medical
             "medical", "prescription", "lab_result", "insurance_eob",
+            # Financial
             "financial", "bank_statement", "investment", "receipt",
+            # Taxes
             "tax", "w2", "1099", "1040",
+            # Insurance (use "claim" for all insurance claims)
             "insurance", "policy", "claim",
+            # Home
             "home", "mortgage", "utility", "repair",
+            # Vehicle
             "vehicle", "registration", "maintenance",
+            # Work & Retirement
             "work", "payslip", "401k", "retirement",
+            # Travel
             "travel", "passport", "visa", "itinerary", "booking",
+            # Media
             "photo", "video", "media",
+            # Reference materials
+            "manual", "guide", "reference",
+            # Catch-all
             "other", "uncategorized",
         ],
         description="Controlled vocabulary for document types"
@@ -160,10 +179,14 @@ class LucienSettings(BaseSettings):
 
     tags: List[str] = Field(
         default_factory=lambda: [
-            "important", "action-required", "archived",
-            "tax-deductible", "warranty", "recurring",
+            # Domain tags
+            "finances", "healthcare", "taxes", "utilities", "dental", "investment", "insurance", "legal",
+            # Document type tags
+            "receipt", "invoice", "payment", "bills", "form:1099", "form:w2", "statement",
+            # Status tags
+            "archived", "action_required", "recurring",
         ],
-        description="Suggested tags vocabulary (user-extendable)"
+        description="Suggested tags vocabulary (user-extendable, providers and years added dynamically)"
     )
 
     # Logging

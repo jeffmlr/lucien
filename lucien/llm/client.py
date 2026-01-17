@@ -108,6 +108,13 @@ class LLMClient:
                 label_data = json.loads(content)
                 label = LabelOutput(**label_data)
 
+                # Validate doc_type is from allowed vocabulary
+                if label.doc_type not in context.available_doc_types:
+                    # Try to find a close match or fall back to "other"
+                    original_type = label.doc_type
+                    label.doc_type = "other"
+                    label.why = f"[Auto-corrected from '{original_type}'] {label.why}"
+
                 return label
 
             except (json.JSONDecodeError, ValidationError) as e:
